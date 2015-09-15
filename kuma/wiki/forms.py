@@ -5,17 +5,20 @@ from django import forms
 from django.conf import settings
 from django.core.exceptions import ObjectDoesNotExist
 from django.forms.widgets import CheckboxSelectMultiple
-
+from django.utils import translation
 
 from kuma.contentflagging.forms import ContentFlagForm
 import kuma.wiki.content
 from kuma.core.form_fields import StrippedCharField
+from kuma.spam.forms import AkismetFormMixin
+
 from .constants import (SLUG_CLEANSING_RE, INVALID_DOC_SLUG_CHARS_RE,
                         INVALID_REV_SLUG_CHARS_RE,
                         DOCUMENT_PATH_RE, REVIEW_FLAG_TAGS,
                         LOCALIZATION_FLAG_TAGS, RESERVED_SLUGS_RES)
 from .events import EditDocumentEvent
-from .models import Document, Revision, RevisionIP, valid_slug_parent
+from .models import (Document, DocumentSpamAttempt, Revision, RevisionIP,
+                     valid_slug_parent)
 from .tasks import send_first_edit_email
 
 
@@ -136,36 +139,59 @@ class DocumentForm(forms.ModelForm):
         return doc
 
 
-class RevisionForm(forms.ModelForm):
+class RevisionForm(AkismetFormMixin, forms.ModelForm):
     """
     Form to create new revisions.
     """
-    title = StrippedCharField(min_length=1,
-                              max_length=255,
-                              required=False,
-                              widget=forms.TextInput(
-                                  attrs={'placeholder': TITLE_PLACEHOLDER}),
-                              label=_lazy(u'Title:'),
-                              help_text=_lazy(u'Title of article'),
-                              error_messages={'required': TITLE_REQUIRED,
-                                              'min_length': TITLE_SHORT,
-                                              'max_length': TITLE_LONG})
-    slug = StrippedCharField(min_length=1,
-                             max_length=255,
-                             required=False,
-                             widget=forms.TextInput(),
-                             label=_lazy(u'Slug:'),
-                             help_text=_lazy(u'Article URL'),
-                             error_messages={'required': SLUG_REQUIRED,
-                                             'min_length': SLUG_SHORT,
-                                             'max_length': SLUG_LONG})
+    ERROR_MESSAGE = '<placeholder see bug 1194768>'
+    AKISMET_FIELDS = [
+        'title',
+        'slug',
+        'summary',
+        'content',
+        'comment',
+        'tags',
+        'keywords',
+    ]
 
-    tags = StrippedCharField(required=False,
-                             label=_lazy(u'Tags:'))
+    title = StrippedCharField(
+        min_length=1,
+        max_length=255,
+        required=False,
+        widget=forms.TextInput(attrs={'placeholder': TITLE_PLACEHOLDER}),
+        label=_lazy(u'Title:'),
+        help_text=_lazy(u'Title of article'),
+        error_messages={
+            'required': TITLE_REQUIRED,
+            'min_length': TITLE_SHORT,
+            'max_length': TITLE_LONG,
+        }
+    )
 
-    keywords = StrippedCharField(required=False,
-                                 label=_lazy(u'Keywords:'),
-                                 help_text=_lazy(u'Affects search results'))
+    slug = StrippedCharField(
+        min_length=1,
+        max_length=255,
+        required=False,
+        widget=forms.TextInput(),
+        label=_lazy(u'Slug:'),
+        help_text=_lazy(u'Article URL'),
+        error_messages={
+            'required': SLUG_REQUIRED,
+            'min_length': SLUG_SHORT,
+            'max_length': SLUG_LONG,
+        }
+    )
+
+    tags = StrippedCharField(
+        required=False,
+        label=_lazy(u'Tags:'),
+    )
+
+    keywords = StrippedCharField(
+        required=False,
+        label=_lazy(u'Keywords:'),
+        help_text=_lazy(u'Affects search results'),
+    )
 
     summary = StrippedCharField(
         required=False,
@@ -174,18 +200,24 @@ class RevisionForm(forms.ModelForm):
         widget=forms.Textarea(),
         label=_lazy(u'Search result summary:'),
         help_text=_lazy(u'Only displayed on search results page'),
-        error_messages={'required': SUMMARY_REQUIRED,
-                        'min_length': SUMMARY_SHORT,
-                        'max_length': SUMMARY_LONG})
+        error_messages={
+            'required': SUMMARY_REQUIRED,
+            'min_length': SUMMARY_SHORT,
+            'max_length': SUMMARY_LONG
+        },
+    )
 
     content = StrippedCharField(
         min_length=5,
         max_length=300000,
         label=_lazy(u'Content:'),
         widget=forms.Textarea(),
-        error_messages={'required': CONTENT_REQUIRED,
-                        'min_length': CONTENT_SHORT,
-                        'max_length': CONTENT_LONG})
+        error_messages={
+            'required': CONTENT_REQUIRED,
+            'min_length': CONTENT_SHORT,
+            'max_length': CONTENT_LONG,
+        }
+    )
 
     comment = StrippedCharField(required=False, label=_lazy(u'Comment:'))
 
@@ -193,16 +225,20 @@ class RevisionForm(forms.ModelForm):
         label=_("Tag this revision for review?"),
         widget=CheckboxSelectMultiple,
         required=False,
-        choices=REVIEW_FLAG_TAGS)
+        choices=REVIEW_FLAG_TAGS,
+    )
 
     localization_tags = forms.MultipleChoiceField(
         label=_("Tag this revision for localization?"),
         widget=CheckboxSelectMultiple,
         required=False,
-        choices=LOCALIZATION_FLAG_TAGS)
+        choices=LOCALIZATION_FLAG_TAGS,
+    )
 
-    current_rev = forms.CharField(required=False,
-                                  widget=forms.HiddenInput())
+    current_rev = forms.CharField(
+        required=False,
+        widget=forms.HiddenInput(),
+    )
 
     class Meta(object):
         model = Revision
@@ -239,13 +275,12 @@ class RevisionForm(forms.ModelForm):
                 content = parsed_content.serialize()
             self.initial['content'] = content
 
-            self.initial['review_tags'] = list(self.instance.review_tags
-                                                            .values_list('name',
-                                                                         flat=True))
+            self.initial['review_tags'] = list(self.instance
+                                                   .review_tags
+                                                   .names())
             self.initial['localization_tags'] = list(self.instance
                                                          .localization_tags
-                                                         .values_list('name',
-                                                                      flat=True))
+                                                         .names())
 
         if self.section_id:
             self.fields['toc_depth'].required = False
@@ -356,14 +391,70 @@ class RevisionForm(forms.ModelForm):
             # If there's no document yet, just bail.
             return current_rev
 
-    def save(self, request, document, **kwargs):
+    def akismet_enabled(self):
+        """
+        Makes sure that users that have been granted the
+        'wiki_akismet_exempted' waffle flag are exempted from spam checks.
+        """
+        api_ready = super(RevisionForm, self).akismet_enabled()
+        user_exempted = waffle.flag_is_active(self.request,
+                                              'wiki_akismet_exempted')
+        return api_ready and not user_exempted
+
+    def akismet_error(self):
+        """
+        Upon errors from the Akismet API records the user, document
+        and date of the attempt for further analysis. Then call the
+        parent class' error handler.
+        """
+        # wrapping this in a try/finally to make sure that even if
+        # creating a spam attempt object fails we call the parent
+        # method that raises a ValidationError
+        try:
+            DocumentSpamAttempt.objects.create({
+                'title': self.cleaned_data['title'],
+                'slug': self.cleaned_data['slug'],
+                'locale': self.cleaned_data['locale'],
+                'user': self.request.user,
+                'document': self.instance and self.document or None,
+            })
+        finally:
+            # self.send_mail_to_spam_watch_mailing_list()
+            super(RevisionForm, self).akismet_error()
+
+    def akismet_parameters(self):
+        """
+        Gets the parent class' default parameters and adds a bunch of
+        wiki document/revision specific parameters like the actual
+        content to check.
+        """
+        parameters = super(RevisionForm, self).akismet_parameters()
+        language = self.cleaned_data.get('locale',
+                                         settings.WIKI_DEFAULT_LANGUAGE)
+        user = self.request.user
+        author = user.fullname or user.get_full_name() or user.username
+        author_email = user.email
+        content = u'\n'.join([self.cleaned_data.get(field, '')
+                              for field in self.AKISMET_FIELDS])
+
+        parameters.update({
+            'comment_author': author,
+            'comment_author_email': author_email,
+            'comment_content': content,
+            'comment_type': 'wiki-revision',
+            'blog_lang': translation.to_locale(language, to_lower=True),  # 'en-US' -> 'en_us'
+            'blog_charset': 'UTF-8',
+        })
+        return parameters
+
+    def save(self, document, **kwargs):
         """
         Persists the revision and returns it.
         Takes the view request and document of the revision.
         Does some specific things when the revision is fully saved.
         """
         # have to check for first edit before we save
-        is_first_edit = request.user.wiki_revisions().count() == 0
+        is_first_edit = self.request.user.wiki_revisions().count() == 0
 
         # Making sure we don't commit the saving right away since we
         # want to do other things here.
@@ -377,7 +468,7 @@ class RevisionForm(forms.ModelForm):
             old_rev = Document.objects.get(pk=self.instance.document.id).current_revision
             new_rev = super(RevisionForm, self).save(**kwargs)
             new_rev.document = document
-            new_rev.creator = request.user
+            new_rev.creator = self.request.user
             new_rev.toc_depth = old_rev.toc_depth
             new_rev.save()
             new_rev.review_tags.set(*list(old_rev.review_tags
@@ -386,7 +477,7 @@ class RevisionForm(forms.ModelForm):
         else:
             new_rev = super(RevisionForm, self).save(**kwargs)
             new_rev.document = document
-            new_rev.creator = request.user
+            new_rev.creator = self.request.user
             new_rev.toc_depth = self.cleaned_data['toc_depth']
             new_rev.save()
             new_rev.review_tags.set(*self.cleaned_data['review_tags'])
@@ -394,7 +485,7 @@ class RevisionForm(forms.ModelForm):
 
             # when enabled store the user's IP address
             if waffle.switch_is_active('store_revision_ips'):
-                ip = request.META.get('REMOTE_ADDR')
+                ip = self.request.META.get('REMOTE_ADDR')
                 RevisionIP.objects.create(revision=new_rev, ip=ip)
 
             # send first edit emails

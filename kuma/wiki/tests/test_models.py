@@ -6,6 +6,7 @@ from xml.sax.saxutils import escape
 
 import mock
 from constance import config
+from constance.test import override_config
 from nose.plugins.attrib import attr
 from nose.tools import eq_, ok_
 from waffle.models import Switch
@@ -15,7 +16,7 @@ from django.core.exceptions import ValidationError
 from django.test.utils import override_settings
 
 from kuma.core.exceptions import ProgrammingError
-from kuma.core.tests import KumaTestCase, override_constance_settings
+from kuma.core.tests import KumaTestCase
 from kuma.users.tests import UserTestCase
 
 from . import (create_template_test_users, create_topical_parents_docs,
@@ -870,6 +871,9 @@ class DumpAndLoadJsonTests(UserTestCase):
             eq_(uploader.id, d_curr.current_revision.creator_id)
 
 
+@override_config(
+    KUMA_DOCUMENT_RENDER_TIMEOUT=600.0,
+    KUMA_DOCUMENT_FORCE_DEFERRED_TIMEOUT=7.0)
 class DeferredRenderingTests(UserTestCase):
 
     def setUp(self):
@@ -877,8 +881,6 @@ class DeferredRenderingTests(UserTestCase):
         self.rendered_content = 'THIS IS RENDERED'
         self.raw_content = 'THIS IS NOT RENDERED CONTENT'
         self.d1, self.r1 = doc_rev('Doc 1')
-        config.KUMA_DOCUMENT_RENDER_TIMEOUT = 600.0
-        config.KUMA_DOCUMENT_FORCE_DEFERRED_TIMEOUT = 7.0
 
     def tearDown(self):
         super(DeferredRenderingTests, self).tearDown()
@@ -892,7 +894,7 @@ class DeferredRenderingTests(UserTestCase):
         ok_(not self.d1.is_rendering_scheduled)
         ok_(not self.d1.is_rendering_in_progress)
 
-    @override_constance_settings(KUMASCRIPT_TIMEOUT=1.0)
+    @override_config(KUMASCRIPT_TIMEOUT=1.0)
     @mock.patch('kuma.wiki.kumascript.get')
     def test_get_rendered(self, mock_kumascript_get):
         """get_rendered() should return rendered content when available,
@@ -922,7 +924,7 @@ class DeferredRenderingTests(UserTestCase):
         eq_(self.rendered_content, result_rendered)
 
     @attr('bug875349')
-    @override_constance_settings(KUMASCRIPT_TIMEOUT=1.0)
+    @override_config(KUMASCRIPT_TIMEOUT=1.0)
     @override_settings(CELERY_ALWAYS_EAGER=True)
     @mock.patch('kuma.wiki.kumascript.get')
     def test_build_json_on_render(self, mock_kumascript_get):
@@ -965,11 +967,11 @@ class DeferredRenderingTests(UserTestCase):
 
     @mock.patch('kuma.wiki.kumascript.get')
     @override_settings(CELERY_ALWAYS_EAGER=True)
+    @override_config(KUMASCRIPT_TIMEOUT=1.0)
     def test_get_summary(self, mock_kumascript_get):
         """
         get_summary() should attempt to use rendered
         """
-        config.KUMASCRIPT_TIMEOUT = 1.0
         mock_kumascript_get.return_value = ('<p>summary!</p>', None)
         ok_(not self.d1.rendered_html)
         result_summary = self.d1.get_summary()
@@ -981,8 +983,6 @@ class DeferredRenderingTests(UserTestCase):
         ok_(mock_kumascript_get.called)
         result_summary = self.d1.get_summary()
         eq_("summary!", result_summary)
-
-        config.KUMASCRIPT_TIMEOUT = 0.0
 
     @mock.patch('kuma.wiki.kumascript.get')
     def test_one_render_at_a_time(self, mock_kumascript_get):
@@ -998,15 +998,14 @@ class DeferredRenderingTests(UserTestCase):
             pass
 
     @mock.patch('kuma.wiki.kumascript.get')
+    @override_config(KUMA_DOCUMENT_RENDER_TIMEOUT=5.0)
     def test_render_timeout(self, mock_kumascript_get):
         """
         A rendering that has taken too long is no longer considered in progress
         """
         mock_kumascript_get.return_value = (self.rendered_content, None)
-        timeout = 5.0
-        config.KUMA_DOCUMENT_RENDER_TIMEOUT = timeout
         self.d1.render_started_at = (datetime.now() -
-                                     timedelta(seconds=timeout + 1))
+                                     timedelta(seconds=5.0 + 1))
         self.d1.save()
         try:
             self.d1.render('', 'http://testserver/')
@@ -1150,7 +1149,7 @@ class RenderExpiresTests(UserTestCase):
         eq_(sorted([d2.pk, d3.pk]),
             sorted([x.pk for x in stale_docs]))
 
-    @override_constance_settings(KUMASCRIPT_TIMEOUT=1.0)
+    @override_config(KUMASCRIPT_TIMEOUT=1.0)
     @mock.patch('kuma.wiki.kumascript.get')
     def test_update_expires_with_max_age(self, mock_kumascript_get):
         mock_kumascript_get.return_value = ('MOCK CONTENT', None)
@@ -1168,7 +1167,7 @@ class RenderExpiresTests(UserTestCase):
         ok_(d1.render_expires > later - timedelta(seconds=1))
         ok_(d1.render_expires < later + timedelta(seconds=1))
 
-    @override_constance_settings(KUMASCRIPT_TIMEOUT=1.0)
+    @override_config(KUMASCRIPT_TIMEOUT=1.0)
     @mock.patch('kuma.wiki.kumascript.get')
     def test_update_expires_without_max_age(self, mock_kumascript_get):
         mock_kumascript_get.return_value = ('MOCK CONTENT', None)
@@ -1181,7 +1180,7 @@ class RenderExpiresTests(UserTestCase):
 
         ok_(not d1.render_expires)
 
-    @override_constance_settings(KUMASCRIPT_TIMEOUT=1.0)
+    @override_config(KUMASCRIPT_TIMEOUT=1.0)
     @mock.patch('kuma.wiki.kumascript.get')
     @mock.patch.object(tasks.render_document, 'delay')
     def test_render_stale(self, mock_render_document_delay,

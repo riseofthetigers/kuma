@@ -164,3 +164,9 @@
 [submodule "vendor/src/django-sundial"]
 	path = vendor/src/django-sundial
 	url = https://github.com/charettes/django-sundial
+[submodule "vendor/src/responses"]
+	path = vendor/src/responses
+	url = https://github.com/getsentry/responses.git
+[submodule "vendor/src/cookies"]
+	path = vendor/src/cookies
+	url = https://github.com/sashahart/cookies.git

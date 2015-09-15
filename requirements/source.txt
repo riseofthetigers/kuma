@@ -75,7 +75,7 @@ django-appconf==1.0.1
 
 django-celery==3.1.16
 
-django-constance==1.0.1
+django-constance==1.1
 
 django-extensions==1.5.5
 
@@ -112,3 +112,7 @@ django-ratelimit==0.5.0
 django-flat-theme==0.9.5
 
 django-sundial==1.0.1
+
+cookies==2.2.1
+
+responses==0.4.0

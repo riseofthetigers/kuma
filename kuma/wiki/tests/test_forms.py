@@ -8,24 +8,27 @@ from ..forms import RevisionForm, TreeMoveForm
 from ..tests import doc_rev, normalize_html
 
 
-class FormEditorSafetyFilterTests(UserTestCase):
+class RevisionFormTests(UserTestCase):
+    rf = RequestFactory()
 
     @attr('bug821986')
     def test_form_onload_attr_filter(self):
-        """RevisionForm should strip out any harmful onload attributes from
-        input markup"""
+        """
+        RevisionForm should strip out any harmful onload attributes from
+        input markup
+        """
         d, r = doc_rev("""
             <svg><circle onload=confirm(3)>
         """)
-        rev_form = RevisionForm(instance=r)
+        request = self.rf.get('/')
+        rev_form = RevisionForm(instance=r, request=request)
         ok_('onload' not in rev_form.initial['content'])
 
-
-class RevisionFormTests(UserTestCase):
-
     def test_form_loaded_with_section(self):
-        """RevisionForm given section_id should load initial content for only
-        one section"""
+        """
+        RevisionForm given section_id should load initial content for only
+        one section
+        """
         d, r = doc_rev("""
             <h1 id="s1">s1</h1>
             <p>test</p>
@@ -44,7 +47,8 @@ class RevisionFormTests(UserTestCase):
             <p>test</p>
             <p>test</p>
         """
-        rev_form = RevisionForm(instance=r, section_id="s2")
+        request = self.rf.get('/')
+        rev_form = RevisionForm(instance=r, section_id='s2', request=request)
         eq_(normalize_html(expected),
             normalize_html(rev_form.initial['content']))
 
@@ -78,12 +82,13 @@ class RevisionFormTests(UserTestCase):
             <p>test</p>
             <p>test</p>
         """
-        rev_form = RevisionForm({"content": replace_content},
-                                instance=r,
-                                section_id="s2")
-        request = RequestFactory().get('/')
+        request = self.rf.get('/')
         request.user = r.creator
-        new_rev = rev_form.save(request, d)
+        rev_form = RevisionForm(data={'content': replace_content},
+                                instance=r,
+                                section_id='s2',
+                                request=request)
+        new_rev = rev_form.save(d)
         eq_(normalize_html(expected),
             normalize_html(new_rev.content))
 
@@ -97,7 +102,10 @@ class RevisionFormTests(UserTestCase):
             'title': 'Title',
             'content': 'Content',
         }
-        rev_form = RevisionForm(data, parent_slug='User:groovecoder')
+        request = self.rf.get('/')
+        rev_form = RevisionForm(data=data,
+                                request=request,
+                                parent_slug='User:groovecoder')
         ok_(not rev_form.is_valid())
 
 
